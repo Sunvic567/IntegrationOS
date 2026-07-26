@@ -14,12 +14,12 @@ from langgraph.graph import StateGraph, END, add_messages
 from tool.crawler import craw_tool
 from tool.parser import parser_tool
 from tool.validator import validate_url
-from langsmith import trace
 from LLM.llm import llm
 from langchain_core.messages import SystemMessage, BaseMessage, AIMessage, ToolMessage, HumanMessage
 from langgraph.prebuilt import ToolNode
 from prompts.reasearch_agent_prompt import research_agent_prompt
-from langgraph.checkpoint.memory import InMemorySaver
+import sqlite3
+from langgraph.checkpoint.sqlite import SqliteSaver
 from langchain_core.runnables import RunnableConfig
 from schemas.tools import ResearchOutput
 
@@ -57,7 +57,6 @@ async def _invoke_llm_with_retry(messages: list) -> AIMessage:
 
 
 # ── Agent node ────────────────────────────────────────────────────────────────
-@trace
 async def research_agent(state: AgentState) -> dict:
     """Reasons over the conversation and calls tools as needed."""
     messages = state.get("messages", [])
@@ -75,12 +74,12 @@ async def research_agent(state: AgentState) -> dict:
         # Still has tool calls → keep looping
         if hasattr(llm_response, "tool_calls") and llm_response.tool_calls:
             logger.info("agent.tool_calls_requested", tool_calls=llm_response.tool_calls)
-            return {"messages": messages + [llm_response]}
+            return {"messages": [llm_response]}
 
         # No more tool calls → pass control to extract_structured_output
         logger.info("agent.reasoning_done")
         return {
-            "messages": messages + [llm_response],
+            "messages": [llm_response],
             "metadata": {
                 **state.get("metadata", {}),
                 "agent_finished_at": datetime.datetime.utcnow().isoformat(),
@@ -104,7 +103,6 @@ async def research_agent(state: AgentState) -> dict:
 
 
 # ── Process tool outputs ──────────────────────────────────────────────────────
-@trace
 def process_tool_outputs(state: AgentState) -> dict:
     """
     After ToolNode runs, read the latest ToolMessages and append their
@@ -157,7 +155,6 @@ def process_tool_outputs(state: AgentState) -> dict:
 
 
 # ── Structured output extraction node ────────────────────────────────────────
-@trace
 async def extract_structured_output(state: AgentState) -> dict:
     """
     Final node: takes all collected raw_docs and parsed_docs from state,
@@ -209,7 +206,6 @@ async def extract_structured_output(state: AgentState) -> dict:
 
 
 # ── Routing ───────────────────────────────────────────────────────────────────
-@trace
 def should_continue(state: AgentState) -> str:
     """Route to tools if tool calls pending, otherwise to structured extraction."""
     messages = state.get("messages", [])
@@ -244,6 +240,7 @@ graph.add_edge("tools", "process_tool_outputs")
 graph.add_edge("process_tool_outputs", "agent")
 graph.add_edge("extract_structured_output", END)
 
-checkpointer = InMemorySaver()
+_conn = sqlite3.connect("checkpoints.db", check_same_thread=False)
+checkpointer = SqliteSaver(_conn)
 app = graph.compile(checkpointer=checkpointer)
-config: RunnableConfig = {"configurable": {"thread_id": "1"}}
+config: RunnableConfig = {"configurable": {"thread_id": "1"}, "recursion_limit": 10}
