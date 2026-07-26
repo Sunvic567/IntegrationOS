@@ -11,4 +11,6 @@ class ResearchOutput(BaseModel):
     auth_method: str
     endpoints: List[EndpointInfo]
     rate_limits: Optional[str]
-    raw_markdown: str
+    example: str
+    webhooks: List[str]
+    api_versioning: List[str]

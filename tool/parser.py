@@ -15,21 +15,26 @@ def parser_tool(payload: EndpointInfo) -> ResearchOutput:
             auth_method = r.get("auth_method", "N/A")
             endpoints = r.get("endpoints", "N/A")
             rate_limits = r.get("rate_limits", "N/A")
-            raw_markdown = r.get("raw_markdown", "N/A")
+            example = r.get("example", "N/A")
+            webhooks = r.get("webhooks", "N/A")
+            api_versioning = r.get("api_versioning", "N/A")
         else:
             base_url = getattr(r, "url", "N/A")
             auth_method = getattr(r, "auth_method", "N/A")
             endpoints = getattr(r, "endpoints", "N/A")
             rate_limits = getattr(r, "rate_limits", "N/A")
-            raw_markdown = getattr(r, "raw_markdown", "N/A")
-
+            example = getattr(r, "example", "N/A")
+            webhooks = getattr(r, "webhooks", "N/A")
+            api_versioning = getattr(r, "api_versioning", "N/A")
         results.append(
-            "URL: {}\nAuth Method: {}\nEndpoints: {}\nRate Limits: {}\nMarkdown: {}".format(
+            "URL: {}\nAuth Method: {}\nEndpoints: {}\nRate Limits: {}\nExample: {}\nWebhooks: {}\nAPI Versioning: {}".format(
                 base_url,
                 auth_method,
                 endpoints,
                 rate_limits,
-                raw_markdown,
+                example,
+                webhooks,
+                api_versioning,
             )
         )
 

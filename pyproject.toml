@@ -13,4 +13,5 @@ dependencies = [
     "langsmith>=0.10.9",
     "python-dotenv>=1.2.2",
     "remem-py>=0.1.4",
+    "structlog>=26.1.0",
 ]
