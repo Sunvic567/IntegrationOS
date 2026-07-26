@@ -161,9 +161,13 @@ def _crawl_with_retry(url: str) -> str:
         raise RuntimeError("Firecrawl returned an empty response.")
 
     logger.info("crawler.succeeded", url=url, pages=len(response))
-    return "\n---\n".join(
-        r.text for r in response if getattr(r, "text", None)
-    ) or "No content found."
+    content = "\n---\n".join(
+        page.text for page in response
+        if getattr(page, "text", None)
+    )
+    if not content:
+        raise RuntimeError("Firecrawl returned pages with no extractable text content.")
+    return content
 
 
 # The provided tool

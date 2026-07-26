@@ -14,4 +14,7 @@ dependencies = [
     "python-dotenv>=1.2.2",
     "remem-py>=0.1.4",
     "structlog>=26.1.0",
+    "tenacity>=8.0.0",
+    "requests>=2.31.0",
+
 ]

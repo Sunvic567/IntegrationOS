@@ -1,41 +1,53 @@
+import structlog
 from langchain_core.tools import tool
-from schemas.tools import EndpointInfo, ResearchOutput
+
+logger = structlog.get_logger("research_agent")
+
+# Keywords that signal API-relevant content sections
+_RELEVANT_KEYWORDS = [
+    "authentication", "auth", "api key", "api-key", "oauth", "bearer", "token",
+    "endpoint", "route", "path", "method", "get ", "post ", "put ", "patch ", "delete ",
+    "rate limit", "rate-limit", "throttle", "quota", "429",
+    "webhook", "event", "callback", "payload",
+    "versioning", "api-version", "api version",
+    "example", "curl", "sample request", "sample response",
+    "base url", "base_url", "host", "https://",
+]
+
 
 @tool
-def parser_tool(payload: EndpointInfo) -> ResearchOutput:
-    """Parse an EndpointInfo payload and return a formatted ResearchOutput string."""
-    results = []
-    response_results = getattr(payload, "results", None)
-    if response_results is None:
-        response_results = []
+def parser_tool(content: str) -> str:
+    """
+    Parse and clean raw API documentation text.
 
-    for r in response_results or []:
-        if isinstance(r, dict):
-            base_url = r.get("url", "N/A")
-            auth_method = r.get("auth_method", "N/A")
-            endpoints = r.get("endpoints", "N/A")
-            rate_limits = r.get("rate_limits", "N/A")
-            example = r.get("example", "N/A")
-            webhooks = r.get("webhooks", "N/A")
-            api_versioning = r.get("api_versioning", "N/A")
-        else:
-            base_url = getattr(r, "url", "N/A")
-            auth_method = getattr(r, "auth_method", "N/A")
-            endpoints = getattr(r, "endpoints", "N/A")
-            rate_limits = getattr(r, "rate_limits", "N/A")
-            example = getattr(r, "example", "N/A")
-            webhooks = getattr(r, "webhooks", "N/A")
-            api_versioning = getattr(r, "api_versioning", "N/A")
-        results.append(
-            "URL: {}\nAuth Method: {}\nEndpoints: {}\nRate Limits: {}\nExample: {}\nWebhooks: {}\nAPI Versioning: {}".format(
-                base_url,
-                auth_method,
-                endpoints,
-                rate_limits,
-                example,
-                webhooks,
-                api_versioning,
-            )
-        )
+    Accepts the raw crawled markdown/text from craw_tool and returns only
+    the sections relevant to authentication, endpoints, rate limits,
+    webhooks, and API versioning — discarding marketing copy and unrelated prose.
+    """
+    if not content or not content.strip():
+        logger.warning("parser.empty_input")
+        return "No content provided to parse."
 
-    return "\n---\n".join(results) if results else "No results found."
+    # Split on page-separator used by craw_tool, filter to relevant pages
+    pages = content.split("\n---\n")
+    relevant_pages: list[str] = []
+
+    for page in pages:
+        page_lower = page.lower()
+        if any(kw in page_lower for kw in _RELEVANT_KEYWORDS):
+            relevant_pages.append(page.strip())
+
+    if not relevant_pages:
+        # Keyword filter stripped everything — return the original rather than silence
+        logger.warning("parser.no_relevant_sections", total_pages=len(pages))
+        return content.strip()
+
+    result = "\n---\n".join(relevant_pages)
+    logger.info(
+        "parser.succeeded",
+        original_pages=len(pages),
+        kept_pages=len(relevant_pages),
+        original_length=len(content),
+        parsed_length=len(result),
+    )
+    return result
