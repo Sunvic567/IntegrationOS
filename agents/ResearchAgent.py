@@ -18,8 +18,7 @@ from LLM.llm import llm
 from langchain_core.messages import SystemMessage, BaseMessage, AIMessage, ToolMessage, HumanMessage
 from langgraph.prebuilt import ToolNode
 from prompts.reasearch_agent_prompt import research_agent_prompt
-import sqlite3
-from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.runnables import RunnableConfig
 from schemas.tools import ResearchOutput
 
@@ -240,7 +239,6 @@ graph.add_edge("tools", "process_tool_outputs")
 graph.add_edge("process_tool_outputs", "agent")
 graph.add_edge("extract_structured_output", END)
 
-_conn = sqlite3.connect("checkpoints.db", check_same_thread=False)
-checkpointer = SqliteSaver(_conn)
+checkpointer = MemorySaver()
 app = graph.compile(checkpointer=checkpointer)
 config: RunnableConfig = {"configurable": {"thread_id": "1"}, "recursion_limit": 10}

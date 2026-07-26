@@ -7,7 +7,7 @@ from langchain_core.messages import HumanMessage
 from agents.ResearchAgent import app, config
 
 # ── Swap this URL to test any API ────────────────────────────────────────────
-TEST_URL = "https://jsonplaceholder.typicode.com"
+TEST_URL = "https://pokeapi.co/docs/v2"
 # ─────────────────────────────────────────────────────────────────────────────
 
 

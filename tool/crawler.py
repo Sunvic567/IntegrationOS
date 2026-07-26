@@ -132,7 +132,7 @@ def _crawl_with_retry(url: str) -> str:
         # Derive include/exclude path patterns (relative, no domain)
         include_patterns = [urlparse(u).path for u in filtered]
         # Crawl starting from base URL, restricting to filtered paths
-        response = firecraw_client.crawl(
+        crawl_job = firecraw_client.crawl(
             base,
             sitemap="include",
             crawl_entire_domain=False,
@@ -148,7 +148,7 @@ def _crawl_with_retry(url: str) -> str:
             url=url,
             fallback="direct crawl with path filters",
         )
-        response = firecraw_client.crawl(
+        crawl_job = firecraw_client.crawl(
             url,
             sitemap="include",
             crawl_entire_domain=False,
@@ -157,13 +157,16 @@ def _crawl_with_retry(url: str) -> str:
             scrape_options=scrape_opts,
         )
 
+    # firecrawl v4 crawl() returns a CrawlJob — extract the actual page list
+    response = crawl_job.data if hasattr(crawl_job, "data") else list(crawl_job)
+
     if not response:
         raise RuntimeError("Firecrawl returned an empty response.")
 
     logger.info("crawler.succeeded", url=url, pages=len(response))
     content = "\n---\n".join(
-        page.text for page in response
-        if getattr(page, "text", None)
+        page.markdown for page in response
+        if getattr(page, "markdown", None)
     )
     if not content:
         raise RuntimeError("Firecrawl returned pages with no extractable text content.")
