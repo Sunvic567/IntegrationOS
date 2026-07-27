@@ -2,11 +2,62 @@ from pydantic import BaseModel, Field
 from typing import List, Optional
 
 
+# ── Sub-models ────────────────────────────────────────────────────────────────
+
+class ParameterInfo(BaseModel):
+    name: str = Field(description="Parameter name, e.g. 'page', 'limit', 'Authorization'")
+    location: str = Field(description="Where the param is passed: 'query', 'path', 'header', or 'body'")
+    type: str = Field(description="Data type: 'string', 'integer', 'boolean', 'object', 'array'")
+    required: bool = Field(description="True if the parameter is required, False if optional")
+    description: Optional[str] = Field(default=None, description="What the parameter does")
+
+
+class ResponseSchema(BaseModel):
+    status_code: int = Field(description="HTTP status code, e.g. 200, 201, 204")
+    description: str = Field(description="What this response means, e.g. 'Success', 'Created'")
+    example: Optional[str] = Field(
+        default=None,
+        description="A JSON example of the response body, as a string"
+    )
+
+
+class ErrorCode(BaseModel):
+    code: str = Field(
+        description="HTTP status code or API-specific error code string, e.g. '429', 'RATE_LIMIT_EXCEEDED'"
+    )
+    name: Optional[str] = Field(default=None, description="Short error name if documented, e.g. 'Unauthorized'")
+    description: str = Field(description="What causes this error and how to handle it")
+
+
+class PaginationInfo(BaseModel):
+    type: str = Field(
+        description="Pagination style: 'cursor', 'page-number', 'offset-limit', 'link-header', or 'none'"
+    )
+    parameter: Optional[str] = Field(
+        default=None,
+        description="Query parameter name used for pagination, e.g. 'page', 'cursor', 'offset'"
+    )
+    description: Optional[str] = Field(
+        default=None,
+        description="Additional details: max page size, default limit, how to get the next page, etc."
+    )
+
+
 class EndpointInfo(BaseModel):
     path: str = Field(description="The endpoint path, e.g. /v1/users/{id}")
     method: str = Field(description="HTTP method: GET, POST, PUT, PATCH, or DELETE")
     description: Optional[str] = Field(default=None, description="Short description of what this endpoint does")
+    parameters: Optional[List[ParameterInfo]] = Field(
+        default=None,
+        description="List of parameters accepted by this endpoint"
+    )
+    response_schema: Optional[ResponseSchema] = Field(
+        default=None,
+        description="The primary success response for this endpoint"
+    )
 
+
+# ── Top-level output ──────────────────────────────────────────────────────────
 
 class ResearchOutput(BaseModel):
     base_url: str = Field(description="The base URL of the API, e.g. https://api.example.com/v1")
@@ -16,7 +67,7 @@ class ResearchOutput(BaseModel):
     )
     endpoints: List[EndpointInfo] = Field(
         default_factory=list,
-        description="List of all API endpoints found in the documentation"
+        description="List of all API endpoints found, each with path, method, parameters, and response schema"
     )
     rate_limits: Optional[str] = Field(
         default=None,
@@ -25,6 +76,14 @@ class ResearchOutput(BaseModel):
     example: Optional[str] = Field(
         default=None,
         description="A concrete usage example: curl command or code snippet showing a real API call"
+    )
+    pagination: Optional[PaginationInfo] = Field(
+        default=None,
+        description="How the API paginates results, or None if pagination is not documented"
+    )
+    error_codes: Optional[List[ErrorCode]] = Field(
+        default=None,
+        description="All documented error codes: HTTP status codes and/or API-specific error strings"
     )
     webhooks: Optional[List[str]] = Field(
         default=None,

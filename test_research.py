@@ -36,9 +36,20 @@ async def run():
         print(f"  base_url     : {research.base_url}")
         print(f"  auth_method  : {research.auth_method}")
         print(f"  endpoints    : {len(research.endpoints)} found")
-        for ep in research.endpoints[:5]:          # show first 5
+        for ep in research.endpoints[:3]:
             print(f"    [{ep.method}] {ep.path} — {ep.description}")
+            if ep.parameters:
+                for p in ep.parameters[:3]:
+                    req = "required" if p.required else "optional"
+                    print(f"      param: {p.name} ({p.location}, {p.type}, {req})")
+            if ep.response_schema:
+                print(f"      response: {ep.response_schema.status_code} — {ep.response_schema.description}")
         print(f"  rate_limits  : {research.rate_limits}")
+        print(f"  pagination   : {research.pagination}")
+        print(f"  error_codes  : {len(research.error_codes) if research.error_codes else 0} found")
+        if research.error_codes:
+            for err in research.error_codes[:3]:
+                print(f"    {err.code} {err.name or ''} — {err.description}")
         print(f"  webhooks     : {research.webhooks}")
         print(f"  api_version  : {research.api_versioning}")
         if research.example:

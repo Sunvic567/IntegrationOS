@@ -177,9 +177,21 @@ async def extract_structured_output(state: AgentState) -> dict:
         ]
 
     extraction_prompt = (
-        "Based on the following research content, extract and return a structured "
-        "ResearchOutput with: base_url, auth_method, endpoints (list of path/method/description), "
-        "rate_limits, example, webhooks, and api_versioning.\n\n"
+        "Based on the following research content, extract and return a structured ResearchOutput.\n\n"
+        "Fields to populate:\n"
+        "- base_url: the API base URL\n"
+        "- auth_method: authentication type and how credentials are passed\n"
+        "- endpoints: list of endpoints, each with:\n"
+        "    - path, method, description\n"
+        "    - parameters: list of {name, location, type, required, description}\n"
+        "    - response_schema: {status_code, description, example}\n"
+        "- rate_limits: requests per minute/hour/day and retry behaviour\n"
+        "- pagination: {type, parameter, description} — cursor/page-number/offset/link-header\n"
+        "- error_codes: list of {code, name, description} for every documented error\n"
+        "- example: a concrete curl or code snippet\n"
+        "- webhooks: list of webhook event details\n"
+        "- api_versioning: how API versions are indicated\n\n"
+        "Leave a field as null/empty if the information is not present in the content.\n\n"
         + "\n\n".join(context_parts)
     )
 
