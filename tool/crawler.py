@@ -27,8 +27,8 @@ scrape_opts = ScrapeOptions(
 )
 
 # ── URL filter config ────────────────────────────────────────────────────────
-INCLUDE_PATHS = ["/api/", "/docs/", "/reference/", "/authentication/", "/Webhooks/", "/api-versioning/"]
-EXCLUDE_PATHS = ["/blog", "/changelog", "/news"]
+INCLUDE_PATHS = ["/api/", "/docs/", "/reference/", "/authentication/", "/Webhooks/", "/api-versioning/", "/developers/"]
+EXCLUDE_PATHS = ["/blog", "/changelog", "/news", "/partnerships", "/community", "/support"]
 
 
 def _base_url(url: str) -> str:
