@@ -1,4 +1,5 @@
 from typing import TypedDict, List, Optional, Annotated
+from urllib.parse import urlparse
 import structlog
 import datetime
 import logging
@@ -21,26 +22,90 @@ from prompts.reasearch_agent_prompt import research_agent_prompt
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.runnables import RunnableConfig
 from schemas.tools import ResearchOutput
+from settings.remem_client import remem, RESEARCH_AGENT_ID
 
 logger = structlog.get_logger("research_agent")
 
 prompt = research_agent_prompt
 
 
-# Agent state
+def _api_user_id(url: str) -> str:
+    """
+    Extract the netloc from the URL to use as a stable Remem key.
+    e.g. "https://docs.stripe.com/api" → "docs.stripe.com"
+    Falls back to the raw URL string if parsing fails.
+    """
+    try:
+        return urlparse(url).netloc or url
+    except Exception:
+        return url
+
+
+def _compute_confidence(result: "ResearchOutput") -> tuple[float, list[str]]:
+    """
+    Score research completeness on a 0.0–1.0 scale.
+    The Planner uses this to decide whether to proceed or request a recrawl.
+
+    Weights reflect how critical each field is for building a test plan:
+      endpoints    0.30  — can't plan without them
+      auth_method  0.20  — required for any authenticated test
+      rate_limits  0.15
+      error_codes  0.15
+      example      0.10  — confirms at least one real call is documented
+      pagination   0.10
+
+    Returns (score, quality_flags) where quality_flags names every missing field.
+    """
+    score = 0.0
+    flags: list[str] = []
+
+    if result.endpoints:
+        score += 0.30
+    else:
+        flags.append("no_endpoints")
+
+    if result.auth_method and result.auth_method.strip().lower() not in ("", "unknown", "none"):
+        score += 0.20
+    else:
+        flags.append("no_auth")
+
+    if result.rate_limits:
+        score += 0.15
+    else:
+        flags.append("no_rate_limits")
+
+    if result.error_codes:
+        score += 0.15
+    else:
+        flags.append("no_error_codes")
+
+    if result.example:
+        score += 0.10
+    else:
+        flags.append("no_example")
+
+    if result.pagination:
+        score += 0.10
+    else:
+        flags.append("no_pagination")
+
+    return round(score, 2), flags
+
+
 class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], add_messages]
-    research_result: Optional[ResearchOutput]   # ← structured output, not markdown
+    research_result: Optional[ResearchOutput]
     raw_docs: list[str]
     parsed_docs: list[str]
     errors: list[str]
     metadata: dict[str, str]
+    api_url: Optional[str]
+    cache_hit: bool
 
 
-# ── LLM variants ─────────────────────────────────────────────────────────────
 tools = [validate_url, craw_tool, parser_tool]
-llm_with_tools   = llm.bind_tools(tools)               # used during tool-calling loop
-llm_structured   = llm.with_structured_output(ResearchOutput)  # used for final extraction
+llm_with_tools = llm.bind_tools(tools)
+llm_structured  = llm.with_structured_output(ResearchOutput)
 
 
 @retry(
@@ -51,31 +116,115 @@ llm_structured   = llm.with_structured_output(ResearchOutput)  # used for final 
     reraise=True,
 )
 async def _invoke_llm_with_retry(messages: list) -> AIMessage:
-    """LLM invocation wrapped with tenacity retry for transient errors."""
     return await llm_with_tools.ainvoke(messages)
 
 
-# ── Agent node ────────────────────────────────────────────────────────────────
+async def check_remem_cache(state: AgentState) -> dict:
+    """
+    Entry node. Checks Remem before doing any crawling.
+    A cache hit skips the entire research loop — the stored ResearchOutput is
+    returned directly. A parse failure on a cached result is treated as a miss
+    so we fall back to fresh crawling rather than crashing.
+    """
+    api_url = state.get("api_url", "")
+    if not api_url:
+        logger.info("remem_cache.no_url_yet")
+        return {"cache_hit": False}
+
+    user_id = _api_user_id(api_url)
+    logger.info("remem_cache.checking", user_id=user_id)
+
+    try:
+        memories = remem.recall(
+            query=f"API research result for {api_url}",
+            user_id=user_id,
+            agent_id=RESEARCH_AGENT_ID,
+        )
+
+        if memories:
+            cached_json = memories[0].get("content", "")
+            logger.info(
+                "remem_cache.hit",
+                user_id=user_id,
+                score=memories[0].get("score"),
+                score_detail=memories[0].get("score_detail"),
+            )
+            try:
+                cached_result = ResearchOutput.model_validate_json(cached_json)
+                return {
+                    "research_result": cached_result,
+                    "cache_hit": True,
+                    "metadata": {
+                        **state.get("metadata", {}),
+                        "remem_cache": "hit",
+                        "remem_user_id": user_id,
+                        "remem_score": str(memories[0].get("score", "")),
+                        "cached_at": memories[0].get("created_at", ""),
+                    },
+                }
+            except Exception as parse_err:
+                logger.warning("remem_cache.parse_failed", error=str(parse_err))
+                return {"cache_hit": False}
+
+    except Exception as e:
+        logger.warning("remem_cache.error", error=str(e))
+
+    logger.info("remem_cache.miss", user_id=user_id)
+    return {"cache_hit": False}
+
+
+async def store_in_remem(state: AgentState) -> dict:
+    """
+    Persists the ResearchOutput after a fresh crawl so the next run for the
+    same API domain hits the cache instead of re-crawling.
+    Storage failure is non-fatal — the result is already in state.
+    """
+    result: Optional[ResearchOutput] = state.get("research_result")
+    api_url = state.get("api_url", "")
+
+    if result is None:
+        logger.warning("remem_store.no_result_to_store")
+        return {}
+
+    user_id = _api_user_id(api_url)
+
+    try:
+        memory_id = remem.remember(
+            result.model_dump_json(),
+            user_id=user_id,
+            agent_id=RESEARCH_AGENT_ID,
+            memory_type="semantic",
+            importance=0.9,
+        )
+        logger.info("remem_store.saved", user_id=user_id, memory_id=memory_id)
+        return {
+            "metadata": {
+                **state.get("metadata", {}),
+                "remem_store": "ok",
+                "remem_memory_id": str(memory_id),
+                "remem_user_id": user_id,
+            }
+        }
+    except Exception as e:
+        logger.warning("remem_store.error", error=str(e))
+        return {}
+
+
 async def research_agent(state: AgentState) -> dict:
-    """Reasons over the conversation and calls tools as needed."""
     messages = state.get("messages", [])
 
-    # Inject system prompt if not already present
     if not messages or not isinstance(messages[0], SystemMessage):
-        system_msg = SystemMessage(content=prompt)
-        messages = [system_msg] + messages
+        messages = [SystemMessage(content=prompt)] + messages
 
     try:
         logger.info("agent.processing_query")
         llm_response = await _invoke_llm_with_retry(messages)
         logger.info("agent.response_received", response_type=type(llm_response).__name__)
 
-        # Still has tool calls → keep looping
         if hasattr(llm_response, "tool_calls") and llm_response.tool_calls:
             logger.info("agent.tool_calls_requested", tool_calls=llm_response.tool_calls)
             return {"messages": [llm_response]}
 
-        # No more tool calls → pass control to extract_structured_output
         logger.info("agent.reasoning_done")
         return {
             "messages": [llm_response],
@@ -87,29 +236,27 @@ async def research_agent(state: AgentState) -> dict:
 
     except RetryError as e:
         logger.error("agent.retry_exhausted", error=str(e))
-        error_msg = AIMessage(content=f"LLM failed after all retries: {e}")
         return {
-            "messages": [error_msg],
+            "messages": [AIMessage(content=f"LLM failed after all retries: {e}")],
             "errors": state.get("errors", []) + [f"RetryError: {e}"],
         }
     except Exception as e:
         logger.exception("agent.error", error=str(e))
-        error_msg = AIMessage(content=f"I encountered an error: {e}")
         return {
-            "messages": [error_msg],
+            "messages": [AIMessage(content=f"I encountered an error: {e}")],
             "errors": state.get("errors", []) + [str(e)],
         }
 
 
-# ── Process tool outputs ──────────────────────────────────────────────────────
 def process_tool_outputs(state: AgentState) -> dict:
     """
-    After ToolNode runs, read the latest ToolMessages and append their
-    content to the correct state bucket based on tool name.
+    Reads ToolMessages from the most recent tool-call round and routes their
+    content into the correct state bucket (raw_docs, parsed_docs, metadata).
+    We scan backwards from the last AIMessage with tool_calls to avoid picking
+    up tool outputs from earlier rounds.
     """
     messages = state.get("messages", [])
 
-    # Find ToolMessages from the most recent tool-call round
     last_ai_idx = 0
     for i, msg in enumerate(messages):
         if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
@@ -132,15 +279,12 @@ def process_tool_outputs(state: AgentState) -> dict:
         if tool_name == "craw_tool":
             raw_docs.append(content)
             logger.info("state.raw_docs.updated", count=len(raw_docs))
-
         elif tool_name == "parser_tool":
             parsed_docs.append(content)
             logger.info("state.parsed_docs.updated", count=len(parsed_docs))
-
         elif tool_name == "validate_url":
             metadata[f"validated_url_{len(metadata)}"] = content
             logger.info("state.metadata.updated", url=content)
-
         else:
             raw_docs.append(f"[{tool_name}] {content}")
             logger.info("state.raw_docs.fallback", tool=tool_name)
@@ -153,11 +297,12 @@ def process_tool_outputs(state: AgentState) -> dict:
     }
 
 
-# ── Structured output extraction node ────────────────────────────────────────
 async def extract_structured_output(state: AgentState) -> dict:
     """
-    Final node: takes all collected raw_docs and parsed_docs from state,
-    asks the LLM to extract a ResearchOutput object from them.
+    Converts accumulated raw_docs and parsed_docs into a structured ResearchOutput.
+    Falls back to pulling AI message content if no docs were collected (edge case
+    where the agent summarised findings in prose rather than calling tools).
+    Confidence is computed and stamped here so the Planner receives it immediately.
     """
     raw_docs    = state.get("raw_docs", [])
     parsed_docs = state.get("parsed_docs", [])
@@ -169,7 +314,6 @@ async def extract_structured_output(state: AgentState) -> dict:
         context_parts.append("## Parsed API data\n" + "\n---\n".join(parsed_docs))
 
     if not context_parts:
-        # Nothing was collected — try to extract from the conversation itself
         messages = state.get("messages", [])
         context_parts = [
             msg.content for msg in messages
@@ -200,12 +344,25 @@ async def extract_structured_output(state: AgentState) -> dict:
         result: ResearchOutput = await llm_structured.ainvoke([
             HumanMessage(content=extraction_prompt)
         ])
-        logger.info("extractor.succeeded", base_url=result.base_url)
+
+        confidence, quality_flags = _compute_confidence(result)
+        result.confidence    = confidence
+        result.quality_flags = quality_flags
+
+        logger.info(
+            "extractor.succeeded",
+            base_url=result.base_url,
+            confidence=confidence,
+            quality_flags=quality_flags,
+            endpoint_count=len(result.endpoints),
+        )
         return {
             "research_result": result,
             "metadata": {
                 **state.get("metadata", {}),
                 "completed_at": datetime.datetime.utcnow().isoformat(),
+                "confidence": str(confidence),
+                "quality_flags": ",".join(quality_flags),
             },
         }
 
@@ -216,16 +373,20 @@ async def extract_structured_output(state: AgentState) -> dict:
         }
 
 
-# ── Routing ───────────────────────────────────────────────────────────────────
+def route_after_cache_check(state: AgentState) -> str:
+    if state.get("cache_hit", False):
+        logger.info("router.cache_hit_skipping_research")
+        return "skip"
+    logger.info("router.cache_miss_starting_research")
+    return "research"
+
+
 def should_continue(state: AgentState) -> str:
-    """Route to tools if tool calls pending, otherwise to structured extraction."""
     messages = state.get("messages", [])
     if not messages:
-        logger.info("router.no_messages")
         return "extract"
 
     last_message = messages[-1]
-
     if isinstance(last_message, AIMessage) and getattr(last_message, "tool_calls", None):
         logger.info("router.continue_to_tools")
         return "continue"
@@ -234,22 +395,33 @@ def should_continue(state: AgentState) -> str:
     return "extract"
 
 
-# ── Graph ─────────────────────────────────────────────────────────────────────
+# Graph:
+#   check_remem_cache → [skip → END] or [agent ↔ tools → extract_structured_output → store_in_remem → END]
 graph = StateGraph(AgentState)
-graph.add_node("agent", research_agent)
-graph.add_node("tools", ToolNode(tools))
-graph.add_node("process_tool_outputs", process_tool_outputs)
-graph.add_node("extract_structured_output", extract_structured_output)
 
-graph.set_entry_point("agent")
+graph.add_node("check_remem_cache",         check_remem_cache)
+graph.add_node("agent",                     research_agent)
+graph.add_node("tools",                     ToolNode(tools))
+graph.add_node("process_tool_outputs",      process_tool_outputs)
+graph.add_node("extract_structured_output", extract_structured_output)
+graph.add_node("store_in_remem",            store_in_remem)
+
+graph.set_entry_point("check_remem_cache")
+
+graph.add_conditional_edges(
+    "check_remem_cache",
+    route_after_cache_check,
+    {"skip": END, "research": "agent"},
+)
 graph.add_conditional_edges(
     "agent",
     should_continue,
     {"continue": "tools", "extract": "extract_structured_output"},
 )
-graph.add_edge("tools", "process_tool_outputs")
-graph.add_edge("process_tool_outputs", "agent")
-graph.add_edge("extract_structured_output", END)
+graph.add_edge("tools",                     "process_tool_outputs")
+graph.add_edge("process_tool_outputs",      "agent")
+graph.add_edge("extract_structured_output", "store_in_remem")
+graph.add_edge("store_in_remem",            END)
 
 checkpointer = MemorySaver()
 app = graph.compile(checkpointer=checkpointer)
