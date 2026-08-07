@@ -62,7 +62,7 @@ async def review(
         skipped=dispatch_result.skipped,
     )
 
-    failed_results = [r for r in dispatch_result.results if r.status == "fail"]
+    failed_results = [r for r in dispatch_result.results if r.execution_status == "failed"]
 
     if not failed_results:
         logger.info("reviewer.all_passed")
@@ -89,7 +89,7 @@ async def review(
             research=research,
             completed_results={
                 tid: res for tid, res in completed_lookup.items()
-                if res.status == "pass" or res.task_id == r.task_id
+                if res.execution_status == "completed" or res.task_id == r.task_id
             },
             sdk_output=sdk_output,
         )
@@ -113,16 +113,16 @@ async def review(
             final_results.append(original)
 
     # Recompute tallies
-    passed  = sum(1 for r in final_results if r.status == "pass")
-    failed  = sum(1 for r in final_results if r.status == "fail")
-    skipped = sum(1 for r in final_results if r.status == "skipped")
+    passed  = sum(1 for r in final_results if r.execution_status == "completed")
+    failed  = sum(1 for r in final_results if r.execution_status == "failed")
+    skipped = sum(1 for r in final_results if r.execution_status == "skipped")
 
     final_sdk_output = next(
-        (r.output for r in final_results if r.tool == "sdk_generator" and r.status == "pass"),
+        (r.output for r in final_results if r.tool == "sdk_generator" and r.execution_status == "completed"),
         dispatch_result.sdk_output,
     )
     final_doc_output = next(
-        (r.output for r in final_results if r.tool == "doc_writer" and r.status == "pass"),
+        (r.output for r in final_results if r.tool == "doc_writer" and r.execution_status == "completed"),
         dispatch_result.doc_output,
     )
 
@@ -163,7 +163,7 @@ def _build_report(
         for original in retried:
             retried_r = retry_map.get(original.task_id)
             if retried_r:
-                icon  = "✅" if retried_r.status == "pass" else "❌"
+                icon  = "✅" if retried_r.execution_status == "completed" else "❌"
                 lines.append(
                     f"- Task {original.task_id} **{original.task_name}**: "
                     f"original={original.status} → retry={icon} {retried_r.status}"
@@ -172,7 +172,7 @@ def _build_report(
 
     lines.append("## Task Results\n")
     for r in dispatch.results:
-        icon = {"pass": "✅", "fail": "❌", "skipped": "⏭️"}.get(r.status, "?")
+        icon = {"completed": "✅", "failed": "❌", "skipped": "⏭️"}.get(r.execution_status, "?")
         lines.append(f"- {icon} [{r.tool}] **{r.task_name}**")
         if r.error:
             lines.append(f"  - Error: {r.error}")

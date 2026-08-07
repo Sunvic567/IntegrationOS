@@ -8,6 +8,7 @@ Workers:
 """
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 from typing import Any, Literal, Optional
@@ -65,12 +66,20 @@ def _normalize_llm_text(content: Any) -> str:
     return str(content).strip()
 
 
-def _result(task: Task, status: Literal["pass", "fail", "skipped"], output: str = "", error: str = "", **meta) -> TaskResult:
+def _result(
+    task: Task,
+    execution_status: Literal["completed", "failed", "skipped"],
+    verification_status: Literal["verified", "failed", "inconclusive", "not_applicable"] = "not_applicable",
+    output: str = "",
+    error: str = "",
+    **meta,
+) -> TaskResult:
     return TaskResult(
         task_id=task.id,
         task_name=task.name,
         tool=task.tool,
-        status=status,
+        execution_status=execution_status,
+        verification_status=verification_status,
         output=output or None,
         error=error or None,
         metadata=meta,
@@ -79,7 +88,7 @@ def _result(task: Task, status: Literal["pass", "fail", "skipped"], output: str 
 
 def _skipped(task: Task, reason: str) -> TaskResult:
     logger.warning("worker.skipped", task_id=task.id, task_name=task.name, reason=reason)
-    return _result(task, "skipped", error=reason)
+    return _result(task, "skipped", verification_status="not_applicable", error=reason)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -119,13 +128,13 @@ class TesterWorker:
         }.get(task.tool)
 
         if handler is None:
-            return _result(task, "fail", error=f"Unknown tool '{task.tool}'")
+            return _result(task, "failed", verification_status="failed", error=f"Unknown tool '{task.tool}'")
 
         try:
             return await handler(task, base_url)
         except Exception as exc:
             logger.exception("tester.unexpected_error", task_id=task.id, error=str(exc))
-            return _result(task, "fail", error=str(exc))
+            return _result(task, "failed", verification_status="failed", error=str(exc))
 
     # ── Auth tester ───────────────────────────────────────────────────────────
     async def _auth_test(self, task: Task, base_url: str) -> TaskResult:
@@ -138,16 +147,27 @@ class TesterWorker:
         client = _get_http_client()
         try:
             resp = await client.head(url)
-            # 401/403 is fine — it proves auth is enforced; 200 means open endpoint
-            reachable = resp.status_code < 500
-            status    = "pass" if reachable else "fail"
+            if resp.status_code in {401, 403}:
+                verification_status = "verified"
+                output = f"Auth dry-run: {method} auth on {url} → HTTP {resp.status_code} (authentication challenge observed)."
+            elif 200 <= resp.status_code < 300:
+                verification_status = "inconclusive"
+                output = f"Auth dry-run: {method} auth on {url} → HTTP {resp.status_code} (endpoint responded without an auth challenge)."
+            elif resp.status_code >= 500:
+                verification_status = "inconclusive"
+                output = f"Auth dry-run: {method} auth on {url} → HTTP {resp.status_code} (server error, unable to verify auth)."
+            else:
+                verification_status = "inconclusive"
+                output = f"Auth dry-run: {method} auth on {url} → HTTP {resp.status_code} (response was inconclusive for auth enforcement)."
             return _result(
-                task, status,
-                output=f"Auth dry-run: {method} auth on {url} → HTTP {resp.status_code}",
+                task,
+                "completed",
+                verification_status=verification_status,
+                output=output,
                 http_status=resp.status_code,
             )
         except httpx.RequestError as exc:
-            return _result(task, "fail", error=f"Network error reaching {url}: {exc}")
+            return _result(task, "failed", verification_status="failed", error=f"Network error reaching {url}: {exc}")
 
     # ── Endpoint tester ───────────────────────────────────────────────────────
     async def _endpoint_test(self, task: Task, base_url: str) -> TaskResult:
@@ -159,17 +179,28 @@ class TesterWorker:
         logger.info("tester.endpoint", url=url, method=http_method)
         client = _get_http_client()
         try:
-            # HEAD is safe for any method — just checks reachability
-            resp = await client.head(url)
-            reachable = resp.status_code < 500
-            status    = "pass" if reachable else "fail"
+            if http_method in {"GET", "HEAD", "OPTIONS"}:
+                method_name = http_method.lower()
+                request_fn = getattr(client, method_name)
+                resp = await request_fn(url)
+                verification_status = "inconclusive"
+                output = f"Endpoint dry-run: executed {http_method} {url} → HTTP {resp.status_code}."
+            else:
+                verification_status = "inconclusive"
+                output = (
+                    f"Endpoint dry-run: skipped live execution for {http_method} {url} because "
+                    "mutation methods require a sandboxed test setup or explicit permission."
+                )
+                return _result(task, "completed", verification_status=verification_status, output=output)
             return _result(
-                task, status,
-                output=f"Endpoint dry-run: {http_method} {url} → HTTP {resp.status_code}",
+                task,
+                "completed",
+                verification_status=verification_status,
+                output=output,
                 http_status=resp.status_code,
             )
         except httpx.RequestError as exc:
-            return _result(task, "fail", error=f"Network error reaching {url}: {exc}")
+            return _result(task, "failed", verification_status="failed", error=f"Network error reaching {url}: {exc}")
 
     # ── Rate tester ───────────────────────────────────────────────────────────
     async def _rate_test(self, task: Task, base_url: str) -> TaskResult:
@@ -187,16 +218,15 @@ class TesterWorker:
                 k: v for k, v in headers.items()
                 if any(kw in k for kw in ("ratelimit", "rate-limit", "x-rate", "retry"))
             }
-            found  = bool(rate_headers)
-            status = "pass" if found else "pass"   # still pass — headers may not be on HEAD
+            verification_status = "verified" if rate_headers else "inconclusive"
             output = (
                 f"Rate limit dry-run on {url} → HTTP {resp.status_code}\n"
                 f"Documented limit: {limit_str}\n"
-                f"Rate-limit headers found: {rate_headers or 'none (may only appear on real requests)'}"
+                f"Rate-limit headers found: {rate_headers or 'none (headers may be absent or returned on a different request type)'}"
             )
-            return _result(task, status, output=output, rate_headers=rate_headers)
+            return _result(task, "completed", verification_status=verification_status, output=output, rate_headers=rate_headers)
         except httpx.RequestError as exc:
-            return _result(task, "fail", error=f"Network error reaching {url}: {exc}")
+            return _result(task, "failed", verification_status="failed", error=f"Network error reaching {url}: {exc}")
 
     # ── Error tester ──────────────────────────────────────────────────────────
     async def _error_test(self, task: Task, base_url: str) -> TaskResult:
@@ -214,12 +244,12 @@ class TesterWorker:
                 # Non-numeric codes (e.g. "RATE_LIMIT_EXCEEDED") are API-specific — allowed
                 pass
 
-        status = "fail" if issues else "pass"
+        verification_status = "failed" if issues else "verified"
         output = (
             f"Error code dry-run: validated {len(codes)} codes.\n"
             + (f"Issues: {issues}" if issues else "All codes are plausible.")
         )
-        return _result(task, status, output=output, validated_codes=codes, issues=issues)
+        return _result(task, "completed", verification_status=verification_status, output=output, validated_codes=codes, issues=issues)
 
     # ── Webhook tester ────────────────────────────────────────────────────────
     async def _webhook_test(self, task: Task, base_url: str) -> TaskResult:
@@ -227,12 +257,12 @@ class TesterWorker:
         logger.info("tester.webhook", events=events)
 
         empty_events = [e for e in events if not str(e).strip()]
-        status = "fail" if empty_events else "pass"
+        verification_status = "failed" if empty_events else "verified"
         output = (
             f"Webhook dry-run: {len(events)} event(s) documented.\n"
             + (f"Empty/invalid events: {empty_events}" if empty_events else "All events are valid strings.")
         )
-        return _result(task, status, output=output, events=events)
+        return _result(task, "completed", verification_status=verification_status, output=output, events=events)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -273,16 +303,41 @@ class SDKWorker:
                 HumanMessage(content=human_content),
             ])
             sdk_code = _normalize_llm_text(getattr(response, "content", ""))
+            if not sdk_code.strip():
+                raise ValueError("LLM returned no SDK code")
+            try:
+                ast.parse(sdk_code)
+            except SyntaxError as exc:
+                logger.warning("sdk_worker.syntax_error", error=str(exc))
+                return _result(task, "failed", verification_status="failed", error=f"Generated SDK contains invalid Python: {exc}")
             logger.info("sdk_worker.done", chars=len(sdk_code))
-            return _result(task, "pass", output=sdk_code)
+            return _result(task, "completed", verification_status="inconclusive", output=sdk_code)
         except Exception as exc:
             logger.exception("sdk_worker.error", error=str(exc))
-            return _result(task, "fail", error=str(exc))
+            return _result(task, "failed", verification_status="failed", error=str(exc))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # WriterWorker
 # ══════════════════════════════════════════════════════════════════════════════
+
+def _validate_doc_output(research: ResearchOutput, doc_md: str) -> bool:
+    if not doc_md.strip():
+        return False
+
+    lowered = doc_md.lower()
+    if research.base_url and research.base_url.lower() not in lowered:
+        return False
+
+    if research.auth_method and research.auth_method.lower() not in lowered:
+        return False
+
+    for endpoint in research.endpoints:
+        path = endpoint.path.strip().lstrip("/")
+        if path and path.lower() not in lowered:
+            return False
+    return True
+
 
 class WriterWorker:
     """
@@ -326,8 +381,9 @@ class WriterWorker:
                 HumanMessage(content=human_content),
             ])
             doc_md = _normalize_llm_text(getattr(response, "content", ""))
+            verification_status = "verified" if _validate_doc_output(research, doc_md) else "failed"
             logger.info("writer_worker.done", chars=len(doc_md))
-            return _result(task, "pass", output=doc_md)
+            return _result(task, "completed", verification_status=verification_status, output=doc_md)
         except Exception as exc:
             logger.exception("writer_worker.error", error=str(exc))
-            return _result(task, "fail", error=str(exc))
+            return _result(task, "failed", verification_status="failed", error=str(exc))

@@ -165,8 +165,11 @@ class TaskResult(BaseModel):
     task_id: int = Field(description="ID of the Task this result corresponds to")
     task_name: str = Field(description="Name of the task for human-readable logging")
     tool: str = Field(description="Tool that produced this result")
-    status: Literal["pass", "fail", "skipped"] = Field(
-        description="Outcome: pass = success, fail = error/assertion failure, skipped = deps failed"
+    execution_status: Literal["completed", "failed", "skipped"] = Field(
+        description="Whether the worker completed, failed, or was skipped"
+    )
+    verification_status: Literal["verified", "not_verified", "failed", "inconclusive", "not_applicable"] = Field(
+        description="Whether the result has evidence to support it, was inconclusive, or was not applicable"
     )
     output: Optional[str] = Field(
         default=None,
@@ -174,12 +177,20 @@ class TaskResult(BaseModel):
     )
     error: Optional[str] = Field(
         default=None,
-        description="Error message if status=fail"
+        description="Error message if execution_status=failed"
     )
     metadata: Dict[str, Any] = Field(
         default_factory=dict,
         description="Extra structured data from the worker (e.g. HTTP status codes, response snippets)"
     )
+
+    @property
+    def status(self) -> str:
+        return {
+            "completed": "pass",
+            "failed": "fail",
+            "skipped": "skipped",
+        }[self.execution_status]
 
 
 class DispatchResult(BaseModel):

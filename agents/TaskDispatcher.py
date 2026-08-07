@@ -98,7 +98,8 @@ async def _dispatch_one(
             task_id=task.id,
             task_name=task.name,
             tool=task.tool,
-            status="fail",
+            execution_status="failed",
+            verification_status="failed",
             error="No research context was provided for this task.",
         )
 
@@ -107,13 +108,14 @@ async def _dispatch_one(
     # Check that all dependencies passed — skip if any dep failed/skipped
     for dep_id in task.depends_on:
         dep_result = completed_results.get(dep_id)
-        if dep_result and dep_result.status != "pass":
+        if dep_result and dep_result.execution_status != "completed":
             return TaskResult(
                 task_id=task.id,
                 task_name=task.name,
                 tool=task.tool,
-                status="skipped",
-                error=f"Skipped because dependency task {dep_id} ({dep_result.task_name}) {dep_result.status}.",
+                execution_status="skipped",
+                verification_status="not_applicable",
+                error=f"Skipped because dependency task {dep_id} ({dep_result.task_name}) {dep_result.execution_status}.",
             )
 
     logger.info("dispatcher.running_task", task_id=task.id, task_name=task.name, tool=task.tool)
@@ -134,7 +136,8 @@ async def _dispatch_one(
         task_id=task.id,
         task_name=task.name,
         tool=task.tool,
-        status="fail",
+        execution_status="failed",
+        verification_status="failed",
         error=f"No worker registered for tool '{task.tool}'",
     )
 
@@ -201,16 +204,16 @@ async def dispatch(plan: ExecutionPlan, research: ResearchOutput) -> DispatchRes
             completed_results[result.task_id] = result
             all_results.append(result)
             # Cache SDK output so WriterWorker can reference it
-            if result.tool == "sdk_generator" and result.status == "pass":
+            if result.tool == "sdk_generator" and result.execution_status == "completed":
                 sdk_output = result.output
 
     # Tally outcomes
-    passed  = sum(1 for r in all_results if r.status == "pass")
-    failed  = sum(1 for r in all_results if r.status == "fail")
-    skipped = sum(1 for r in all_results if r.status == "skipped")
+    passed  = sum(1 for r in all_results if r.execution_status == "completed")
+    failed  = sum(1 for r in all_results if r.execution_status == "failed")
+    skipped = sum(1 for r in all_results if r.execution_status == "skipped")
 
     doc_output = next(
-        (r.output for r in all_results if r.tool == "doc_writer" and r.status == "pass"),
+        (r.output for r in all_results if r.tool == "doc_writer" and r.execution_status == "completed"),
         None,
     )
 
