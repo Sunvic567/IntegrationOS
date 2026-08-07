@@ -1,0 +1,9 @@
+{
+  "api_url": "https://docs.stripe.com/api",
+  "verdict": null,
+  "error_count": 1,
+  "duration_seconds": 8.984,
+  "errors": [
+    "\u26d4 ResearchAgent produced no output. Aborting pipeline."
+  ]
+}

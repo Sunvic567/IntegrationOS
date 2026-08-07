@@ -13,9 +13,8 @@ def _get_env(name: str, default: str = "") -> str:
 
 
 FIRECRAW_API_KEY: Final[str] = _get_env("FIRECRAW_API_KEY")
-OPENROUTER_API_KEY: Final[str] = _get_env("OPENROUTER_API_KEY") or _get_env("OPENAI_API_KEY")
-OPENROUTER_BASE_URL: Final[str] = _get_env("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-MODEL_NAME: Final[str] = _get_env("MODEL_NAME", "openai/gpt-4o-mini")
+GOOGLE_API_KEY: Final[str] = _get_env("GOOGLE_API_KEY")
+MODEL_NAME: Final[str] = _get_env("MODEL_NAME", "gemini-2.0-flash")
 REMEM_API_KEY: Final[str] = _get_env("REMEM_API_KEY")
 
 # Backward-compatible alias used elsewhere in the project

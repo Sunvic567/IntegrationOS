@@ -17,6 +17,7 @@ from pathlib import Path
 
 import structlog
 from dotenv import load_dotenv
+from langchain_core.runnables import RunnableConfig
 
 load_dotenv()
 
@@ -65,7 +66,7 @@ async def run(api_url: str) -> int:
 
     logger.info("pipeline.start", api_url=api_url)
 
-    config = {
+    config: RunnableConfig = {
         **orchestrator_config,
         "configurable": {"thread_id": f"orchestrator-{api_url}"},
     }
