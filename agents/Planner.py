@@ -64,8 +64,14 @@ def _plan_user_id(research_result: Optional[ResearchOutput], api_url: Optional[s
 )
 async def _invoke_structured_with_retry(system_msg: SystemMessage, human_msg: HumanMessage) -> ExecutionPlan:
     """Structured LLM invocation with tenacity retry for transient errors."""
-    # Fix #4: only [SystemMessage, HumanMessage] — no conversation history
-    return await llm_structured.ainvoke([system_msg, human_msg])
+    raw_result = await llm_structured.ainvoke([system_msg, human_msg])
+    if isinstance(raw_result, ExecutionPlan):
+        return raw_result
+    if isinstance(raw_result, dict):
+        return ExecutionPlan.model_validate(raw_result)
+    if hasattr(raw_result, "model_dump"):
+        return ExecutionPlan.model_validate(raw_result.model_dump())
+    raise TypeError(f"Planner LLM returned unsupported output type: {type(raw_result).__name__}")
 
 
 # ── Node 1: Validate research quality ────────────────────────────────────────
@@ -154,7 +160,7 @@ async def load_remem_context(state: AgentState) -> dict:
     LLM can improve on previous work rather than starting from scratch.
     """
     research_result = state.get("research_result")
-    api_url = state.get("api_url", "")
+    api_url = state.get("api_url") or ""
     user_id = _plan_user_id(research_result, api_url)
 
     prior_context = ""
@@ -165,14 +171,15 @@ async def load_remem_context(state: AgentState) -> dict:
             agent_id=PLANNER_AGENT_ID,
         )
         if memories:
+            first_memory = memories[0]
             logger.info(
                 "planner_remem.prior_plan_found",
                 user_id=user_id,
                 count=len(memories),
-                score=memories[0].get("score"),
-                score_detail=memories[0].get("score_detail"),
+                score=getattr(first_memory, "score", None),
+                score_detail=getattr(first_memory, "score_detail", None),
             )
-            prior_text = "\n\n---\n\n".join(m.get("content", "") for m in memories)
+            prior_text = "\n\n---\n\n".join(getattr(m, "content", "") or "" for m in memories)
             prior_context = (
                 "\n\n## Prior Plans for This API (from Remem memory)\n"
                 "A plan was previously generated for this same API. "
@@ -203,6 +210,13 @@ async def _planner_node(state: AgentState) -> dict:
             assigns depends_on values based on task type and order.
     """
     result = state.get("research_result")
+
+    if result is None:
+        logger.error("planner.no_research_result")
+        return {
+            "messages": [AIMessage(content="Planner could not run because no research result was provided.")],
+            "plan": None,
+        }
 
     # Enrich the system prompt with any prior Remem context
     remem_ctx = state.get("remem_context", "")

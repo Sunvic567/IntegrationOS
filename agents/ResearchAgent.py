@@ -23,6 +23,8 @@ from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.runnables import RunnableConfig
 from schemas.tools import ResearchOutput
 from settings.remem_client import remem, RESEARCH_AGENT_ID
+from guardrails import run_guardrail
+from guardrails.guardrail import format_violation
 
 logger = structlog.get_logger("research_agent")
 
@@ -101,11 +103,54 @@ class AgentState(TypedDict):
     metadata: dict[str, str]
     api_url: Optional[str]
     cache_hit: bool
+    guardrail_blocked: bool   # ← set True if guardrail fires
 
 
 tools = [validate_url, craw_tool, parser_tool]
 llm_with_tools = llm.bind_tools(tools)
 llm_structured  = llm.with_structured_output(ResearchOutput)
+
+
+# ── Node 0: Guardrail ───────────────────────────────────────────────────────────────────────────────
+
+async def check_guardrails(state: AgentState) -> dict:
+    """
+    Entry gate: screens api_url and any user messages for toxic language
+    or jailbreak attempts before any crawling or LLM calls happen.
+    """
+    api_url = state.get("api_url", "") or ""
+    messages = state.get("messages", [])
+
+    # Build the text corpus to screen: URL + all human message content
+    text_parts = [api_url] + [
+        m.content for m in messages
+        if hasattr(m, "content") and isinstance(m.content, str)
+    ]
+    combined = "\n".join(t for t in text_parts if t.strip())
+
+    guard = await run_guardrail(combined, context="research_agent")
+
+    if not guard.is_safe:
+        block_msg = format_violation(guard, agent_name="ResearchAgent")
+        logger.warning(
+            "research_agent.guardrail_blocked",
+            violation_type=guard.violation_type,
+            severity=guard.severity,
+        )
+        return {
+            "messages": [AIMessage(content=block_msg)],
+            "guardrail_blocked": True,
+            "errors": state.get("errors", []) + [block_msg],
+        }
+
+    logger.info("research_agent.guardrail_passed", api_url=api_url)
+    return {"guardrail_blocked": False}
+
+
+def route_after_guardrail(state: AgentState) -> str:
+    if state.get("guardrail_blocked", False):
+        return "blocked"
+    return "continue"
 
 
 @retry(
@@ -142,12 +187,13 @@ async def check_remem_cache(state: AgentState) -> dict:
         )
 
         if memories:
-            cached_json = memories[0].get("content", "")
+            first_memory = memories[0]
+            cached_json = getattr(first_memory, "content", "") or ""
             logger.info(
                 "remem_cache.hit",
                 user_id=user_id,
-                score=memories[0].get("score"),
-                score_detail=memories[0].get("score_detail"),
+                score=getattr(first_memory, "score", None),
+                score_detail=getattr(first_memory, "score_detail", None),
             )
             try:
                 cached_result = ResearchOutput.model_validate_json(cached_json)
@@ -158,8 +204,8 @@ async def check_remem_cache(state: AgentState) -> dict:
                         **state.get("metadata", {}),
                         "remem_cache": "hit",
                         "remem_user_id": user_id,
-                        "remem_score": str(memories[0].get("score", "")),
-                        "cached_at": memories[0].get("created_at", ""),
+                        "remem_score": str(getattr(first_memory, "score", "")),
+                        "cached_at": getattr(first_memory, "created_at", ""),
                     },
                 }
             except Exception as parse_err:
@@ -180,7 +226,7 @@ async def store_in_remem(state: AgentState) -> dict:
     Storage failure is non-fatal — the result is already in state.
     """
     result: Optional[ResearchOutput] = state.get("research_result")
-    api_url = state.get("api_url", "")
+    api_url = state.get("api_url") or ""
 
     if result is None:
         logger.warning("remem_store.no_result_to_store")
@@ -341,9 +387,16 @@ async def extract_structured_output(state: AgentState) -> dict:
 
     try:
         logger.info("extractor.running")
-        result: ResearchOutput = await llm_structured.ainvoke([
+        raw_result = await llm_structured.ainvoke([
             HumanMessage(content=extraction_prompt)
         ])
+
+        if isinstance(raw_result, ResearchOutput):
+            result = raw_result
+        elif isinstance(raw_result, dict):
+            result = ResearchOutput.model_validate(raw_result)
+        else:
+            result = ResearchOutput.model_validate(raw_result.model_dump())
 
         confidence, quality_flags = _compute_confidence(result)
         result.confidence    = confidence
@@ -396,9 +449,11 @@ def should_continue(state: AgentState) -> str:
 
 
 # Graph:
+#   check_guardrails → [blocked → END] or
 #   check_remem_cache → [skip → END] or [agent ↔ tools → extract_structured_output → store_in_remem → END]
 graph = StateGraph(AgentState)
 
+graph.add_node("check_guardrails",          check_guardrails)
 graph.add_node("check_remem_cache",         check_remem_cache)
 graph.add_node("agent",                     research_agent)
 graph.add_node("tools",                     ToolNode(tools))
@@ -406,8 +461,13 @@ graph.add_node("process_tool_outputs",      process_tool_outputs)
 graph.add_node("extract_structured_output", extract_structured_output)
 graph.add_node("store_in_remem",            store_in_remem)
 
-graph.set_entry_point("check_remem_cache")
+graph.set_entry_point("check_guardrails")
 
+graph.add_conditional_edges(
+    "check_guardrails",
+    route_after_guardrail,
+    {"blocked": END, "continue": "check_remem_cache"},
+)
 graph.add_conditional_edges(
     "check_remem_cache",
     route_after_cache_check,

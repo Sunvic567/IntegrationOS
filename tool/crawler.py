@@ -1,8 +1,9 @@
-import structlog
 import logging
+from typing import Any
 import requests
+import structlog
 import xml.etree.ElementTree as ET
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urlparse
 from langchain_core.tools import tool
 from firecrawl import Firecrawl
 from firecrawl.v2.types import ScrapeOptions
@@ -51,9 +52,12 @@ def _fetch_sitemap_urls(base: str) -> list[str]:
     # Also check robots.txt for a Sitemap: directive
     try:
         robots = requests.get(f"{base}/robots.txt", timeout=10)
-        for line in robots.text.splitlines():
-            if line.lower().startswith("sitemap:"):
-                candidates.insert(0, line.split(":", 1)[1].strip())
+        if robots.ok:
+            for line in robots.text.splitlines():
+                if line.lower().startswith("sitemap:"):
+                    sitemap_value = line.split(":", 1)[1].strip()
+                    if sitemap_value:
+                        candidates.insert(0, sitemap_value)
     except Exception:
         pass
 
@@ -63,23 +67,31 @@ def _fetch_sitemap_urls(base: str) -> list[str]:
     for sitemap_url in candidates:
         try:
             resp = requests.get(sitemap_url, timeout=10)
-            if resp.status_code != 200:
+            if not resp.ok:
                 continue
-            root = ET.fromstring(resp.content)
+
+            content = resp.content.decode("utf-8", errors="ignore") if isinstance(resp.content, (bytes, bytearray)) else str(resp.content)
+            root = ET.fromstring(content)
 
             # Sitemap index — recurse into child sitemaps
             for child in root.findall("sm:sitemap/sm:loc", ns):
-                child_urls = _fetch_sitemap_urls(child.text.strip())
-                all_urls.extend(child_urls)
+                child_text = (child.text or "").strip()
+                if child_text:
+                    child_urls = _fetch_sitemap_urls(child_text)
+                    all_urls.extend(child_urls)
 
             # Regular sitemap
             for loc in root.findall("sm:url/sm:loc", ns):
-                all_urls.append(loc.text.strip())
+                loc_text = (loc.text or "").strip()
+                if loc_text:
+                    all_urls.append(loc_text)
 
             if all_urls:
                 logger.info("crawler.sitemap_found", sitemap=sitemap_url, count=len(all_urls))
                 break  # stop once we have results
 
+        except ET.ParseError:
+            logger.warning("crawler.sitemap_parse_failed", sitemap=sitemap_url)
         except Exception as exc:
             logger.warning("crawler.sitemap_fetch_failed", sitemap=sitemap_url, error=str(exc))
 
@@ -164,10 +176,18 @@ def _crawl_with_retry(url: str) -> str:
         raise RuntimeError("Firecrawl returned an empty response.")
 
     logger.info("crawler.succeeded", url=url, pages=len(response))
-    content = "\n---\n".join(
-        page.markdown for page in response
-        if getattr(page, "markdown", None)
-    )
+
+    markdown_chunks: list[str] = []
+    for page in response:
+        if isinstance(page, tuple):
+            page = page[1] if len(page) > 1 else None
+        if page is None:
+            continue
+        markdown = getattr(page, "markdown", None)
+        if isinstance(markdown, str) and markdown.strip():
+            markdown_chunks.append(markdown.strip())
+
+    content = "\n---\n".join(markdown_chunks)
     if not content:
         raise RuntimeError("Firecrawl returned pages with no extractable text content.")
     return content

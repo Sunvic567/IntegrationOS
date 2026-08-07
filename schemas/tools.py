@@ -1,5 +1,6 @@
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List, Optional, Dict, Any, Literal
+
 
 
 
@@ -155,3 +156,51 @@ class ExecutionPlan(BaseModel):
     tasks: List[Task] = Field(
         description="Ordered list of tasks. Tasks with no depends_on can run in parallel."
     )
+
+
+# ── Execution / Dispatch schemas ──────────────────────────────────────────────
+
+class TaskResult(BaseModel):
+    """Output produced by a single worker after executing one Task."""
+    task_id: int = Field(description="ID of the Task this result corresponds to")
+    task_name: str = Field(description="Name of the task for human-readable logging")
+    tool: str = Field(description="Tool that produced this result")
+    status: Literal["pass", "fail", "skipped"] = Field(
+        description="Outcome: pass = success, fail = error/assertion failure, skipped = deps failed"
+    )
+    output: Optional[str] = Field(
+        default=None,
+        description="Prose or code output produced by the worker (SDK code, doc markdown, test report, etc.)"
+    )
+    error: Optional[str] = Field(
+        default=None,
+        description="Error message if status=fail"
+    )
+    metadata: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Extra structured data from the worker (e.g. HTTP status codes, response snippets)"
+    )
+
+
+class DispatchResult(BaseModel):
+    """Aggregated output from the Task Dispatcher after all workers have run."""
+    total_tasks: int = Field(description="Total number of tasks dispatched")
+    passed: int = Field(description="Number of tasks that passed")
+    failed: int = Field(description="Number of tasks that failed")
+    skipped: int = Field(description="Number of tasks that were skipped due to dependency failures")
+    results: List[TaskResult] = Field(
+        default_factory=list,
+        description="Per-task results in execution order"
+    )
+    sdk_output: Optional[str] = Field(
+        default=None,
+        description="Generated Python SDK code, if sdk_generator task ran successfully"
+    )
+    doc_output: Optional[str] = Field(
+        default=None,
+        description="Generated markdown documentation, if doc_writer task ran successfully"
+    )
+
+    @property
+    def overall_status(self) -> str:
+        return "pass" if self.failed == 0 else "fail"

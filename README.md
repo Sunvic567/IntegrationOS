@@ -1,22 +1,24 @@
 System Architecture               
                
-                User
-                 │
-                 ▼
-        Orchestrator Agent
-                 │
- ┌───────────────┼────────────────┐
- │               │                │
- ▼               ▼                ▼
-Research      Testing         Writer
- │               │                │
- ▼               ▼                ▼
-Planner      Validator      Documentation
- │               │                │
- └───────────────┼────────────────┘
-                 ▼
-          Project Generator
-
+              User
+                  │
+                  ▼
+        Workflow Orchestrator
+                  │
+      ┌───────────┼────────────┐
+      ▼           ▼            ▼
+Validate      Research      Planner
+ Input         Agent         Agent
+                  │            │
+                  └────┬───────┘
+                       ▼
+               ExecutionPlan
+                       │
+                       ▼
+              Task Dispatcher
+            ┌──────┼────────┐
+            ▼      ▼        ▼
+         Tester   SDK     Writer
 User Flow
 
 User enters:
