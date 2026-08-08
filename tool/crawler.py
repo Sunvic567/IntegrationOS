@@ -115,7 +115,7 @@ def _filter_urls(urls: list[str]) -> list[str]:
 
 @retry(
     stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=2, max=10),
+    wait=wait_exponential(multiplier=1, min=15, max=60),
     retry=retry_if_exception_type((RuntimeError, ConnectionError, TimeoutError)),
     before_sleep=before_sleep_log(logging.getLogger("research_agent"), logging.WARNING),
     reraise=True,
@@ -140,6 +140,7 @@ def _crawl_with_retry(url: str) -> str:
             total=len(sitemap_urls),
             kept=len(filtered),
             sample=filtered[:5],
+             limit=20,
         )
         # Derive include/exclude path patterns (relative, no domain)
         include_patterns = [urlparse(u).path for u in filtered]
@@ -151,6 +152,7 @@ def _crawl_with_retry(url: str) -> str:
             include_paths=include_patterns,
             exclude_paths=EXCLUDE_PATHS,
             scrape_options=scrape_opts,
+             limit=20,
         )
     else:
         # Sitemap unavailable or no matching pages — fall back to direct crawl

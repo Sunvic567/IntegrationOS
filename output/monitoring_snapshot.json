@@ -1,9 +1,9 @@
 {
-  "api_url": "https://docs.stripe.com/api",
+  "api_url": "https://api.remem.online",
   "verdict": null,
   "error_count": 1,
-  "duration_seconds": 8.984,
+  "duration_seconds": 73.398,
   "errors": [
-    "\u26d4 ResearchAgent produced no output. Aborting pipeline."
+    "\u26d4 ResearchAgent error: Firecrawl craw failed: Rate Limit Exceeded: Failed to start crawl. Rate limit exceeded. Consumed (req/min): 3, Remaining (req/min): 0. Upgrade your plan at https://firecrawl.dev/pricing for increased rate limits or please retry after 8s, resets at Sat Aug 08 2026 21:34:53 GMT+0000 (Coordinated Universal Time) - No additional error details provided."
   ]
 }
