@@ -23,7 +23,7 @@ from agents.Orchestrator import OrchestratorState, orchestrator_app, orchestrato
 if streamlit_module is None:
     raise RuntimeError("Streamlit is not installed. Install it with 'pip install streamlit' before running this UI.")
 
-for key, value in st.secrets.items():
+for key, value in streamlit_module.secrets.items():
     os.environ.setdefault(key, str(value))
 
 st = cast(Any, streamlit_module)
