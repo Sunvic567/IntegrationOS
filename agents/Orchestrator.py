@@ -23,9 +23,10 @@ Workflow Orchestrator — top-level LangGraph that sequences the full pipeline:
 """
 from __future__ import annotations
 
-from typing import Annotated, List, Optional, TypedDict
+from typing import Annotated, List, Optional, TypedDict, cast
 
 import httpx
+import uuid
 import structlog
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
@@ -33,9 +34,8 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph, add_messages
 
 from agents import TaskDispatcher
-from agents.ResearchAgent import app as research_app
-from agents.ResearchAgent import config as research_config
-from agents.Planner import planner_app, config as planner_config
+from agents.Planner import AgentState as PlannerAgentState, planner_app, config as planner_config
+from agents.ResearchAgent import AgentState as ResearchAgentState, app as research_app, config as research_config
 from agents.ReviewerAgent import review
 from guardrails import run_guardrail, GuardrailResult
 from guardrails.guardrail import format_violation
@@ -49,6 +49,7 @@ logger = structlog.get_logger("orchestrator")
 class OrchestratorState(TypedDict):
     messages:        Annotated[List[BaseMessage], add_messages]
     api_url:         Optional[str]
+    run_id: Optional[str]
     research_result: Optional[ResearchOutput]
     plan:            Optional[ExecutionPlan]
     dispatch_result: Optional[DispatchResult]
@@ -136,18 +137,20 @@ async def run_research(state: OrchestratorState) -> dict:
 
     try:
         # Invoke the ResearchAgent sub-graph
+        research_input: ResearchAgentState = {
+            "messages": [HumanMessage(content=f"Research the API at: {api_url}")],
+            "api_url": api_url,
+            "research_result": None,
+            "raw_docs": [],
+            "parsed_docs": [],
+            "errors": [],
+            "metadata": {},
+            "cache_hit": False,
+            "guardrail_blocked": False,
+        }
         research_state = await research_app.ainvoke(
-            {
-                "messages":        [HumanMessage(content=f"Research the API at: {api_url}")],
-                "api_url":         api_url,
-                "research_result": None,
-                "raw_docs":        [],
-                "parsed_docs":     [],
-                "errors":          [],
-                "metadata":        {},
-                "cache_hit":       False,
-            },
-            config={**research_config, "configurable": {"thread_id": f"research-{api_url}"}},
+            cast(ResearchAgentState, research_input),
+            config={**research_config,  "configurable": {"thread_id": f"research-{api_url}-{state.get('run_id', '')}"},},
         )
         result: Optional[ResearchOutput] = research_state.get("research_result")
 
@@ -186,18 +189,19 @@ async def run_planner(state: OrchestratorState) -> dict:
     logger.info("orchestrator.planner.start")
 
     try:
+        planner_input: PlannerAgentState = {
+            "messages": [HumanMessage(content="Generate an execution plan.")],
+            "research_result": research_result,
+            "plan": None,
+            "api_url": api_url,
+            "validation_passed": None,
+            "validation_errors": [],
+            "remem_context": "",
+            "remem_user_id": "",
+        }
         planner_state = await planner_app.ainvoke(
-            {
-                "messages":          [HumanMessage(content="Generate an execution plan.")],
-                "research_result":   research_result,
-                "plan":              None,
-                "api_url":           api_url,
-                "validation_passed": None,
-                "validation_errors": [],
-                "remem_context":     "",
-                "remem_user_id":     "",
-            },
-            config={**planner_config, "configurable": {"thread_id": f"planner-{api_url}"}},
+            cast(PlannerAgentState, planner_input),
+            config={**planner_config,  "configurable": {"thread_id": f"research-{api_url}-{state.get('run_id', '')}"} },
         )
         plan: Optional[ExecutionPlan] = planner_state.get("plan")
 
@@ -227,8 +231,17 @@ async def run_planner(state: OrchestratorState) -> dict:
 # ── Node 4: Run Task Dispatcher ────────────────────────────────────────────────
 
 async def run_dispatcher(state: OrchestratorState) -> dict:
-    plan            = state.get("plan")
+    plan = state.get("plan")
     research_result = state.get("research_result")
+
+    if plan is None or research_result is None:
+        msg = "⛔ Dispatcher could not run because the plan or research result is missing."
+        logger.error("orchestrator.dispatcher.missing_inputs")
+        return {
+            "messages": [AIMessage(content=msg)],
+            "errors": state.get("errors", []) + [msg],
+        }
+
     logger.info("orchestrator.dispatcher.start", tasks=len(plan.tasks) if plan else 0)
 
     try:
@@ -260,8 +273,17 @@ async def run_dispatcher(state: OrchestratorState) -> dict:
 
 async def run_reviewer(state: OrchestratorState) -> dict:
     dispatch_result = state.get("dispatch_result")
-    plan            = state.get("plan")
+    plan = state.get("plan")
     research_result = state.get("research_result")
+
+    if dispatch_result is None or plan is None or research_result is None:
+        msg = "⛔ Reviewer could not run because the dispatch result, plan, or research result is missing."
+        logger.error("orchestrator.reviewer.missing_inputs")
+        return {
+            "messages": [AIMessage(content=msg)],
+            "errors": state.get("errors", []) + [msg],
+        }
+
     logger.info("orchestrator.reviewer.start")
 
     try:
@@ -350,6 +372,6 @@ orchestrator_workflow.add_edge("abort",          END)
 
 orchestrator_app = orchestrator_workflow.compile(checkpointer=MemorySaver())
 orchestrator_config: RunnableConfig = {
-    "configurable": {"thread_id": "orchestrator-1"},
+    "configurable": {"thread_id": "orchestrator-default"},
     "recursion_limit": 50,
 }

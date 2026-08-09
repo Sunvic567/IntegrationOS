@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import Any
 import requests
 import structlog
@@ -30,6 +31,29 @@ scrape_opts = ScrapeOptions(
 # ── URL filter config ────────────────────────────────────────────────────────
 INCLUDE_PATHS = ["/api/", "/docs/", "/reference/", "/authentication/", "/Webhooks/", "/api-versioning/", "/developers/"]
 EXCLUDE_PATHS = ["/blog", "/changelog", "/news", "/partnerships", "/community", "/support"]
+
+
+def _clean_markdown(text: str) -> str:
+    """Strip repeated nav/boilerplate noise from crawled markdown before it reaches the LLM."""
+    text = re.sub(
+        r"hCaptcha\n\nhCaptcha.*?hCaptcha logo, opens new window with more information\)" ,
+        "",
+        text,
+        flags=re.DOTALL,
+    )
+
+    text = re.sub(r"\n{3,}", "\n\n", text)
+
+    noise_patterns = [
+        r"^\[Skip to content\].*$",
+        r"^\[Create account\].*$",
+        r"^\[The Stripe Docs logo\].*$",
+        r"^Search\n`/`Ask AI$",
+    ]
+    for pat in noise_patterns:
+        text = re.sub(pat, "", text, flags=re.MULTILINE)
+
+    return text.strip()
 
 
 def _base_url(url: str) -> str:
@@ -187,7 +211,9 @@ def _crawl_with_retry(url: str) -> str:
             continue
         markdown = getattr(page, "markdown", None)
         if isinstance(markdown, str) and markdown.strip():
-            markdown_chunks.append(markdown.strip())
+            cleaned = _clean_markdown(markdown.strip())
+            if cleaned:
+                markdown_chunks.append(cleaned)
 
     content = "\n---\n".join(markdown_chunks)
     if not content:

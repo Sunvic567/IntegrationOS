@@ -53,3 +53,25 @@ def test_crawl_with_retry_raises_clear_error_when_no_content(monkeypatch):
 
     with pytest.raises(RuntimeError, match="no extractable text content"):
         crawler._crawl_with_retry("https://example.com")
+
+
+def test_clean_markdown_removes_boilerplate_noise():
+    noisy = """
+    [Skip to content]
+
+    hCaptcha
+
+    hCaptcha logo, opens new window with more information)
+
+    Search
+    `/`Ask AI
+
+    Real API content here.
+    """
+
+    cleaned = crawler._clean_markdown(noisy)
+
+    assert "[Skip to content]" not in cleaned
+    assert "hCaptcha" not in cleaned
+    assert "Search" not in cleaned
+    assert "Real API content here." in cleaned

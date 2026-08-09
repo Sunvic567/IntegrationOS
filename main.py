@@ -13,6 +13,7 @@ import asyncio
 import json
 import sys
 import time
+import uuid
 from pathlib import Path
 
 import structlog
@@ -66,15 +67,18 @@ async def run(api_url: str) -> int:
 
     logger.info("pipeline.start", api_url=api_url)
 
+    run_id = uuid.uuid4().hex[:8]
+
     config: RunnableConfig = {
         **orchestrator_config,
-        "configurable": {"thread_id": f"orchestrator-{api_url}"},
+         "configurable": {"thread_id": f"orchestrator-{api_url}-{run_id}"},
     }
 
     final_state = await orchestrator_app.ainvoke(
         {
             "messages":        [],
             "api_url":         api_url,
+            "run_id":          run_id,
             "research_result": None,
             "plan":            None,
             "dispatch_result": None,

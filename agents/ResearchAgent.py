@@ -485,4 +485,4 @@ graph.add_edge("store_in_remem",            END)
 
 checkpointer = MemorySaver()
 app = graph.compile(checkpointer=checkpointer)
-config: RunnableConfig = {"configurable": {"thread_id": "1"}, "recursion_limit": 10}
+config: RunnableConfig = {"configurable": {"thread_id": "1"}, "recursion_limit": 50}

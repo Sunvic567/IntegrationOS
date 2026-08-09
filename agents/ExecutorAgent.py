@@ -14,6 +14,7 @@ import json
 from typing import Any, Literal, Optional
 
 import httpx
+import math 
 import structlog
 
 from LLM.llm import llm
@@ -342,8 +343,11 @@ def _validate_doc_output(research: ResearchOutput, doc_md: str) -> bool:
 class WriterWorker:
     """
     Uses the LLM to generate a markdown integration guide from the research output
-    and a summary of test results.
+    and a summary of test results. Generates in batches to avoid single-completion
+    corruption on large endpoint sets.
     """
+
+    BATCH_SIZE = 10
 
     def handles(self, tool: str) -> bool:
         return tool == "doc_writer"
@@ -358,32 +362,73 @@ class WriterWorker:
         inputs   = task.inputs
         base_url = inputs.get("base_url", research.base_url)
 
-        endpoint_detail = json.dumps(
-            [ep.model_dump() for ep in research.endpoints],
-            indent=2,
-        )
+        logger.info("writer_worker.generating", base_url=base_url, endpoint_count=len(research.endpoints))
 
-        human_content = (
-            f"Write a complete integration guide for:\n\n"
-            f"Base URL: {base_url}\n"
-            f"Auth method: {research.auth_method}\n"
-            f"Rate limits: {research.rate_limits or 'not documented'}\n"
-            f"Error codes: {[e.model_dump() for e in (research.error_codes or [])]}\n\n"
-            f"Endpoints:\n{endpoint_detail}\n\n"
-            f"Test results summary:\n{test_summary}\n\n"
-            + (f"Generated SDK (reference only):\n```python\n{sdk_code}\n```\n" if sdk_code else "")
-        )
-
-        logger.info("writer_worker.generating", base_url=base_url)
         try:
-            response = await llm.ainvoke([
+            sections: list[str] = []
+
+            # ── 1. Overview / auth / rate limits / errors (no endpoints — small, single call) ──
+            intro_prompt = (
+                f"Write the Overview, Prerequisites, Authentication, and Rate Limits "
+                f"sections of an API integration guide for:\n\n"
+                f"Base URL: {base_url}\n"
+                f"Auth method: {research.auth_method}\n"
+                f"Rate limits: {research.rate_limits or 'not documented'}\n"
+                f"Error codes: {[e.model_dump() for e in (research.error_codes or [])]}\n\n"
+                f"Do not include endpoint documentation yet — that will be added separately."
+            )
+            intro_resp = await llm.ainvoke([
                 SystemMessage(content=doc_writer_prompt),
-                HumanMessage(content=human_content),
+                HumanMessage(content=intro_prompt),
             ])
-            doc_md = _normalize_llm_text(getattr(response, "content", ""))
+            sections.append(_normalize_llm_text(getattr(intro_resp, "content", "")))
+
+            # ── 2. Endpoint documentation, batched ──
+            endpoints = research.endpoints
+            num_batches = math.ceil(len(endpoints) / self.BATCH_SIZE) if endpoints else 0
+
+            for batch_idx in range(num_batches):
+                start = batch_idx * self.BATCH_SIZE
+                end = start + self.BATCH_SIZE
+                batch = endpoints[start:end]
+                batch_detail = json.dumps([ep.model_dump() for ep in batch], indent=2)
+
+                batch_prompt = (
+                    f"Document the following {len(batch)} API endpoints (batch "
+                    f"{batch_idx + 1} of {num_batches}). For each endpoint include: "
+                    f"a description, a parameters table, an example request (curl), "
+                    f"and an example response.\n\n{batch_detail}"
+                )
+                logger.info("writer_worker.batch", batch=batch_idx + 1, of=num_batches, endpoints=len(batch))
+
+                batch_resp = await llm.ainvoke([
+                    SystemMessage(content=doc_writer_prompt),
+                    HumanMessage(content=batch_prompt),
+                ])
+                batch_text = _normalize_llm_text(getattr(batch_resp, "content", ""))
+                if batch_text.strip():
+                    sections.append(batch_text)
+                else:
+                    logger.warning("writer_worker.empty_batch", batch=batch_idx + 1)
+
+            # ── 3. Quick-start example, referencing the SDK ──
+            quickstart_prompt = (
+                f"Write a short Quick-Start example showing how to use this generated "
+                f"SDK to make a couple of real calls against the API:\n\n"
+                + (f"```python\n{sdk_code}\n```" if sdk_code else "(no SDK code available)")
+            )
+            qs_resp = await llm.ainvoke([
+                SystemMessage(content=doc_writer_prompt),
+                HumanMessage(content=quickstart_prompt),
+            ])
+            sections.append(_normalize_llm_text(getattr(qs_resp, "content", "")))
+
+            doc_md = "\n\n".join(s for s in sections if s.strip())
+
             verification_status = "verified" if _validate_doc_output(research, doc_md) else "failed"
-            logger.info("writer_worker.done", chars=len(doc_md))
+            logger.info("writer_worker.done", chars=len(doc_md), batches=num_batches)
             return _result(task, "completed", verification_status=verification_status, output=doc_md)
+
         except Exception as exc:
             logger.exception("writer_worker.error", error=str(exc))
             return _result(task, "failed", verification_status="failed", error=str(exc))

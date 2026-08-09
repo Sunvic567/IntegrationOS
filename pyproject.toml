@@ -20,4 +20,5 @@ dependencies = [
     "httpx>=0.28.1",
     "pytest>=9.0.2",
     "langchain-google-genai>=4.3.1",
+    "streamlit>=1.61.1",
 ]
