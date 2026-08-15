@@ -9,6 +9,7 @@ import json
 import re
 import uuid
 from typing import Any, cast, Optional
+import os
 
 try:
     import streamlit as streamlit_module
@@ -21,6 +22,9 @@ from agents.Orchestrator import OrchestratorState, orchestrator_app, orchestrato
 
 if streamlit_module is None:
     raise RuntimeError("Streamlit is not installed. Install it with 'pip install streamlit' before running this UI.")
+
+for key, value in streamlit_module.secrets.items():
+    os.environ.setdefault(key, str(value))
 
 st = cast(Any, streamlit_module)
 st.set_page_config(page_title="API Onboarding Assistant", page_icon="🧩", layout="wide")
